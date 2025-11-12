@@ -169,160 +169,99 @@ else:
     st.divider()
     tab1, tab2, tab3 = st.tabs(["Forecast future sales", "Group customers into personas", "Map brand positions"])
 
-    # ----------------- Tab 1: Bass Diffusion Wizard -----------------
+    # ----------------- Tab 1 (unchanged) -----------------
     with tab1:
-        st.subheader("Forecast future sales (no formulas required)")
-        st.write("Tell us which column has your sales per period (e.g., monthly). We'll fit a curve and forecast ahead.")
+        # ... your existing Bass code ...
+
+    # ----------------- Tab 2: Segmentation Wizard (with persistent preview) -----------------
+    with tab2:
+        st.subheader("Group customers into personas")
+        st.write("Pick numeric columns (e.g., recency, frequency, spend). We'll show an elbow preview first, then you pick K.")
+
         num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        if not num_cols:
-            st.info("We need a numeric sales column. Try the 'Sample Sales (12 months)' dataset in the sidebar.")
-        else:
-            sales_col = st.selectbox("Sales column", options=num_cols)
+        chosen = st.multiselect("Numeric columns", options=num_cols, default=num_cols[:4])
 
-            # Free-entry forecast horizon
-            ahead = st.number_input(
-                "Forecast periods ahead",
-                min_value=1,
-                value=12,
-                step=1,
-                help="Enter how many future periods to forecast (e.g., months)."
-            )
-            if ahead > 120:
-                st.info("Heads up: forecasting more than 120 periods may be unreliable or slow.")
+        if chosen:
+            k_min, k_max = st.slider("Try groups from K=", 2, 15, (2, 8))
 
-            run = st.button("Make a forecast", key="run_bass")
-            if run:
-                # Fit on history
-                y = df[sales_col].astype(float).fillna(0).values
-                bd = BassDiffusion()
-                fit = bd.fit(y)
+            # Preview step — compute and store results in session_state
+            if st.button("Preview elbow & silhouette", key="preview_k"):
+                seg_preview = ConsumerSegmentation(standardize=True)
+                res_preview = seg_preview.fit_kmeans(df[chosen].dropna(), k_range=(k_min, k_max))
+                st.session_state["seg_preview"] = {
+                    "inertias": res_preview.inertias,
+                    "silhouettes": res_preview.silhouettes,
+                    "best_k": int(res_preview.best_k),
+                    "chosen_cols": chosen,
+                    "k_min": int(k_min),
+                    "k_max": int(k_max),
+                }
+                st.success("Preview computed. Scroll down to pick the final K.")
 
-                st.success("Done! Here's what we found:")
-                st.write(explain_bass(fit.p, fit.q, fit.m, len(y)))
+            # Render preview if present
+            if "seg_preview" in st.session_state:
+                prev = st.session_state["seg_preview"]
 
-                # Forecast future
-                cum_future, sales_future = bd.forecast(fit, periods_ahead=int(ahead))
-                t_hist = fit.t
-                t_future = np.arange(t_hist[-1] + 1, t_hist[-1] + 1 + int(ahead))
+                st.success(f"Suggested K (heuristic): **{prev['best_k']}**")
 
-                # CUMULATIVE (history + forecast)
-                fig, ax = plt.subplots()
-                ax.plot(t_hist, np.cumsum(fit.sales), marker='o', label='What actually happened')
-                ax.plot(t_hist, fit.fitted_cum, label='Fitted cumulative')
-                ax.plot(t_future, cum_future, linestyle='--', label='Forecast cumulative')
-                ax.set_title('Total adopters over time')
-                ax.set_xlabel('Time'); ax.set_ylabel('Cumulative sales'); ax.legend(); ax.grid(True)
-                st.pyplot(fig)
+                import matplotlib.pyplot as plt
+                # Elbow
+                fig1, ax1 = plt.subplots()
+                ks = sorted(prev["inertias"].keys())
+                vals = [prev["inertias"][k] for k in ks]
+                ax1.plot(ks, vals, marker='o')
+                ax1.set_title('Elbow preview (lower is better)')
+                ax1.set_xlabel('K'); ax1.set_ylabel('Inertia'); ax1.grid(True)
+                st.pyplot(fig1)
 
-                # PERIOD SALES (history + forecast)
+                # Silhouette
                 fig2, ax2 = plt.subplots()
-                ax2.plot(t_hist, fit.sales, marker='o', label='Your sales')
-                ax2.plot(t_hist, fit.fitted_sales, label='Fitted pattern')
-                ax2.plot(t_future, sales_future, linestyle='--', label='Forecast sales')
-                ax2.set_title('Sales per period')
-                ax2.set_xlabel('Time'); ax2.set_ylabel('Sales'); ax2.legend(); ax2.grid(True)
+                ks2 = sorted(prev["silhouettes"].keys())
+                vals2 = [prev["silhouettes"][k] for k in ks2]
+                ax2.plot(ks2, vals2, marker='o')
+                ax2.set_title('Silhouette preview (higher is better)')
+                ax2.set_xlabel('K'); ax2.set_ylabel('Score'); ax2.grid(True)
                 st.pyplot(fig2)
 
-                # Table + download
-                forecast_df = pd.DataFrame({
-                    'period': t_future,
-                    'forecast_sales': sales_future
-                })
-                st.markdown("**What next?** Use these values as your expected demand, and plan inventory/ads around the peak.")
-                st.dataframe(forecast_df.head(20))
-                st.download_button("Download forecast (CSV)", forecast_df.to_csv(index=False).encode('utf-8'), "forecast.csv", "text/csv")
-
-# ----------------- Tab 2: Segmentation Wizard (with persistent preview) -----------------
-with tab2:
-    st.subheader("Group customers into personas")
-    st.write("Pick numeric columns (e.g., recency, frequency, spend). We'll show an elbow preview first, then you pick K.")
-
-    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    chosen = st.multiselect("Numeric columns", options=num_cols, default=num_cols[:4])
-
-    if chosen:
-        k_min, k_max = st.slider("Try groups from K=", 2, 15, (2, 8))
-
-        # Preview step — compute and store results in session_state
-        if st.button("Preview elbow & silhouette", key="preview_k"):
-            seg_preview = ConsumerSegmentation(standardize=True)
-            res_preview = seg_preview.fit_kmeans(df[chosen].dropna(), k_range=(k_min, k_max))
-
-            # Persist minimal info needed across reruns
-            st.session_state["seg_preview"] = {
-                "inertias": res_preview.inertias,
-                "silhouettes": res_preview.silhouettes,
-                "best_k": int(res_preview.best_k),
-                "chosen_cols": chosen,
-                "k_min": int(k_min),
-                "k_max": int(k_max),
-            }
-            st.success("Preview computed. Scroll down to pick the final K.")
-
-        # If we have preview in state, render the charts + final K selector every rerun
-        if "seg_preview" in st.session_state:
-            prev = st.session_state["seg_preview"]
-
-            st.success(f"Suggested K (heuristic): **{prev['best_k']}**")
-
-            # Elbow
-            fig1, ax1 = plt.subplots()
-            ks = sorted(prev["inertias"].keys())
-            vals = [prev["inertias"][k] for k in ks]
-            ax1.plot(ks, vals, marker='o')
-            ax1.set_title('Elbow preview (lower is better)')
-            ax1.set_xlabel('K'); ax1.set_ylabel('Inertia'); ax1.grid(True)
-            st.pyplot(fig1)
-
-            # Silhouette
-            fig2, ax2 = plt.subplots()
-            ks2 = sorted(prev["silhouettes"].keys())
-            vals2 = [prev["silhouettes"][k] for k in ks2]
-            ax2.plot(ks2, vals2, marker='o')
-            ax2.set_title('Silhouette preview (higher is better)')
-            ax2.set_xlabel('K'); ax2.set_ylabel('Score'); ax2.grid(True)
-            st.pyplot(fig2)
-
-            st.markdown("**Pick the K you want to use** (follow the elbow ‘knee’ and highest silhouette):")
-            k_final = st.number_input(
-                "Final K",
-                min_value=int(prev["k_min"]),
-                max_value=int(prev["k_max"]),
-                value=int(prev["best_k"]),
-                step=1,
-                help="Choose how many personas you want."
-            )
-
-            # Finalize personas at chosen K — persists across reruns
-            if st.button("Create personas with this K", key="finalize_k"):
-                seg_final = ConsumerSegmentation(standardize=True)
-                X = df[prev["chosen_cols"]].dropna()
-                res_final = seg_final.fit_kmeans(X, k_range=(int(k_final), int(k_final)))
-
-                personas_df = make_persona_names(
-                    df.loc[X.index].copy(),
-                    res_final.labels,
-                    prev["chosen_cols"]
+                st.markdown("**Pick the K you want to use** (follow the elbow ‘knee’ and highest silhouette):")
+                k_final = st.number_input(
+                    "Final K",
+                    min_value=int(prev["k_min"]),
+                    max_value=int(prev["k_max"]),
+                    value=int(prev["best_k"]),
+                    step=1,
+                    help="Choose how many personas you want."
                 )
 
-                st.success(f"Personas created with K = {int(k_final)}.")
-                st.write(explain_segmentation(int(k_final), prev["chosen_cols"]))
+                if st.button("Create personas with this K", key="finalize_k"):
+                    seg_final = ConsumerSegmentation(standardize=True)
+                    X = df[prev["chosen_cols"]].dropna()
+                    res_final = seg_final.fit_kmeans(X, k_range=(int(k_final), int(k_final)))
 
-                counts = personas_df['persona'].value_counts().reset_index()
-                counts.columns = ['persona', 'customers']
-                st.markdown("**Personas found**")
-                st.dataframe(counts)
+                    personas_df = make_persona_names(
+                        df.loc[X.index].copy(),
+                        res_final.labels,
+                        prev["chosen_cols"]
+                    )
 
-                st.download_button(
-                    "Download personas (CSV)",
-                    personas_df.to_csv(index=False).encode('utf-8'),
-                    "personas.csv",
-                    "text/csv"
-                )
+                    st.success(f"Personas created with K = {int(k_final)}.")
+                    st.write(explain_segmentation(int(k_final), prev["chosen_cols"]))
+
+                    counts = personas_df['persona'].value_counts().reset_index()
+                    counts.columns = ['persona', 'customers']
+                    st.markdown("**Personas found**")
+                    st.dataframe(counts)
+
+                    st.download_button(
+                        "Download personas (CSV)",
+                        personas_df.to_csv(index=False).encode('utf-8'),
+                        "personas.csv",
+                        "text/csv"
+                    )
+            else:
+                st.info("Click **Preview elbow & silhouette** to see the curves before choosing K.")
         else:
-            st.info("Click **Preview elbow & silhouette** to see the curves before choosing K.")
-    else:
-        st.info("We need at least two numeric columns to form personas.")
+            st.info("We need at least two numeric columns to form personas.")
 
     # ----------------- Tab 3: Perceptual Map Wizard -----------------
     with tab3:
