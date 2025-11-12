@@ -232,42 +232,83 @@ else:
                 st.dataframe(forecast_df.head(20))
                 st.download_button("Download forecast (CSV)", forecast_df.to_csv(index=False).encode('utf-8'), "forecast.csv", "text/csv")
 
-    # ----------------- Tab 2: Segmentation Wizard -----------------
-    with tab2:
-        st.subheader("Group customers into personas")
-        st.write("Pick numeric columns (e.g., recency, frequency, spend). We'll find patterns and name the groups.")
-        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        chosen = st.multiselect("Numeric columns", options=num_cols, default=num_cols[:4])
-        if chosen:
-            k_min, k_max = st.slider("Try groups from K=", 2, 15, (2, 8))
-            if st.button("Find personas", key="run_segm"):
-                seg = ConsumerSegmentation(standardize=True)
-                res = seg.fit_kmeans(df[chosen].dropna(), k_range=(k_min, k_max))
-                personas_df = make_persona_names(df.loc[df[chosen].dropna().index].copy(), res.labels, chosen)
+# ----------------- Tab 2: Segmentation Wizard -----------------
+with tab2:
+    st.subheader("Group customers into personas")
+    st.write("Pick numeric columns (e.g., recency, frequency, spend). We'll show an elbow preview first, then you pick K.")
 
-                st.success("We created personas for you.")
-                st.write(explain_segmentation(res.best_k, chosen))
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    chosen = st.multiselect("Numeric columns", options=num_cols, default=num_cols[:4])
 
-                fig1, ax1 = plt.subplots()
-                ks = sorted(res.inertias.keys())
-                vals = [res.inertias[k] for k in ks]
-                ax1.plot(ks, vals, marker='o'); ax1.set_title('Are we overfitting? (Elbow)'); ax1.set_xlabel('K'); ax1.set_ylabel('Inertia'); ax1.grid(True)
-                st.pyplot(fig1)
+    if chosen:
+        k_min, k_max = st.slider("Try groups from K=", 2, 15, (2, 8))
 
-                fig2, ax2 = plt.subplots()
-                ks2 = sorted(res.silhouettes.keys())
-                vals2 = [res.silhouettes[k] for k in ks2]
-                ax2.plot(ks2, vals2, marker='o'); ax2.set_title('How clean are the groups? (Silhouette)'); ax2.set_xlabel('K'); ax2.set_ylabel('Score'); ax2.grid(True)
-                st.pyplot(fig2)
+        # 1) Preview button: compute elbow/silhouette over the range, no personas yet
+        preview = st.button("Preview elbow & silhouette", key="preview_k")
+        if preview:
+            seg_preview = ConsumerSegmentation(standardize=True)
+            res_preview = seg_preview.fit_kmeans(df[chosen].dropna(), k_range=(k_min, k_max))
+
+            st.success(f"Preview ready. Suggested K (based on our heuristic): **{res_preview.best_k}**")
+
+            # Elbow
+            fig1, ax1 = plt.subplots()
+            ks = sorted(res_preview.inertias.keys())
+            vals = [res_preview.inertias[k] for k in ks]
+            ax1.plot(ks, vals, marker='o')
+            ax1.set_title('Elbow preview (lower is better)')
+            ax1.set_xlabel('K'); ax1.set_ylabel('Inertia'); ax1.grid(True)
+            st.pyplot(fig1)
+
+            # Silhouette
+            fig2, ax2 = plt.subplots()
+            ks2 = sorted(res_preview.silhouettes.keys())
+            vals2 = [res_preview.silhouettes[k] for k in ks2]
+            ax2.plot(ks2, vals2, marker='o')
+            ax2.set_title('Silhouette preview (higher is better)')
+            ax2.set_xlabel('K'); ax2.set_ylabel('Score'); ax2.grid(True)
+            st.pyplot(fig2)
+
+            st.markdown("**Pick the K you want to use** (you can follow the elbow ‘knee’ and the highest silhouette):")
+            k_final = st.number_input(
+                "Final K",
+                min_value=int(k_min),
+                max_value=int(k_max),
+                value=int(res_preview.best_k),
+                step=1,
+                help="Choose how many personas you want."
+            )
+
+            # 2) Finalize button: run clustering at exactly K = k_final and produce personas
+            if st.button("Create personas with this K", key="finalize_k"):
+                seg_final = ConsumerSegmentation(standardize=True)
+                res_final = seg_final.fit_kmeans(df[chosen].dropna(), k_range=(int(k_final), int(k_final)))
+
+                personas_df = make_persona_names(
+                    df.loc[df[chosen].dropna().index].copy(),
+                    res_final.labels,
+                    chosen
+                )
+
+                st.success(f"Personas created with K = {int(k_final)}.")
+                st.write(explain_segmentation(int(k_final), chosen))
 
                 counts = personas_df['persona'].value_counts().reset_index()
                 counts.columns = ['persona', 'customers']
                 st.markdown("**Personas found**")
                 st.dataframe(counts)
 
-                st.download_button("Download personas (CSV)", personas_df.to_csv(index=False).encode('utf-8'), "personas.csv", "text/csv")
+                st.download_button(
+                    "Download personas (CSV)",
+                    personas_df.to_csv(index=False).encode('utf-8'),
+                    "personas.csv",
+                    "text/csv"
+                )
         else:
-            st.info("We need at least two numeric columns to form personas.")
+            st.info("Click **Preview elbow & silhouette** to see the curves before choosing K.")
+    else:
+        st.info("We need at least two numeric columns to form personas.")
+
 
     # ----------------- Tab 3: Perceptual Map Wizard -----------------
     with tab3:
