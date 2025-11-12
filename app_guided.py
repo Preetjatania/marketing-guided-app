@@ -232,7 +232,7 @@ else:
                 st.dataframe(forecast_df.head(20))
                 st.download_button("Download forecast (CSV)", forecast_df.to_csv(index=False).encode('utf-8'), "forecast.csv", "text/csv")
 
-# ----------------- Tab 2: Segmentation Wizard -----------------
+# ----------------- Tab 2: Segmentation Wizard (with persistent preview) -----------------
 with tab2:
     st.subheader("Group customers into personas")
     st.write("Pick numeric columns (e.g., recency, frequency, spend). We'll show an elbow preview first, then you pick K.")
@@ -243,18 +243,32 @@ with tab2:
     if chosen:
         k_min, k_max = st.slider("Try groups from K=", 2, 15, (2, 8))
 
-        # 1) Preview button: compute elbow/silhouette over the range, no personas yet
-        preview = st.button("Preview elbow & silhouette", key="preview_k")
-        if preview:
+        # Preview step — compute and store results in session_state
+        if st.button("Preview elbow & silhouette", key="preview_k"):
             seg_preview = ConsumerSegmentation(standardize=True)
             res_preview = seg_preview.fit_kmeans(df[chosen].dropna(), k_range=(k_min, k_max))
 
-            st.success(f"Preview ready. Suggested K (based on our heuristic): **{res_preview.best_k}**")
+            # Persist minimal info needed across reruns
+            st.session_state["seg_preview"] = {
+                "inertias": res_preview.inertias,
+                "silhouettes": res_preview.silhouettes,
+                "best_k": int(res_preview.best_k),
+                "chosen_cols": chosen,
+                "k_min": int(k_min),
+                "k_max": int(k_max),
+            }
+            st.success("Preview computed. Scroll down to pick the final K.")
+
+        # If we have preview in state, render the charts + final K selector every rerun
+        if "seg_preview" in st.session_state:
+            prev = st.session_state["seg_preview"]
+
+            st.success(f"Suggested K (heuristic): **{prev['best_k']}**")
 
             # Elbow
             fig1, ax1 = plt.subplots()
-            ks = sorted(res_preview.inertias.keys())
-            vals = [res_preview.inertias[k] for k in ks]
+            ks = sorted(prev["inertias"].keys())
+            vals = [prev["inertias"][k] for k in ks]
             ax1.plot(ks, vals, marker='o')
             ax1.set_title('Elbow preview (lower is better)')
             ax1.set_xlabel('K'); ax1.set_ylabel('Inertia'); ax1.grid(True)
@@ -262,36 +276,37 @@ with tab2:
 
             # Silhouette
             fig2, ax2 = plt.subplots()
-            ks2 = sorted(res_preview.silhouettes.keys())
-            vals2 = [res_preview.silhouettes[k] for k in ks2]
+            ks2 = sorted(prev["silhouettes"].keys())
+            vals2 = [prev["silhouettes"][k] for k in ks2]
             ax2.plot(ks2, vals2, marker='o')
             ax2.set_title('Silhouette preview (higher is better)')
             ax2.set_xlabel('K'); ax2.set_ylabel('Score'); ax2.grid(True)
             st.pyplot(fig2)
 
-            st.markdown("**Pick the K you want to use** (you can follow the elbow ‘knee’ and the highest silhouette):")
+            st.markdown("**Pick the K you want to use** (follow the elbow ‘knee’ and highest silhouette):")
             k_final = st.number_input(
                 "Final K",
-                min_value=int(k_min),
-                max_value=int(k_max),
-                value=int(res_preview.best_k),
+                min_value=int(prev["k_min"]),
+                max_value=int(prev["k_max"]),
+                value=int(prev["best_k"]),
                 step=1,
                 help="Choose how many personas you want."
             )
 
-            # 2) Finalize button: run clustering at exactly K = k_final and produce personas
+            # Finalize personas at chosen K — persists across reruns
             if st.button("Create personas with this K", key="finalize_k"):
                 seg_final = ConsumerSegmentation(standardize=True)
-                res_final = seg_final.fit_kmeans(df[chosen].dropna(), k_range=(int(k_final), int(k_final)))
+                X = df[prev["chosen_cols"]].dropna()
+                res_final = seg_final.fit_kmeans(X, k_range=(int(k_final), int(k_final)))
 
                 personas_df = make_persona_names(
-                    df.loc[df[chosen].dropna().index].copy(),
+                    df.loc[X.index].copy(),
                     res_final.labels,
-                    chosen
+                    prev["chosen_cols"]
                 )
 
                 st.success(f"Personas created with K = {int(k_final)}.")
-                st.write(explain_segmentation(int(k_final), chosen))
+                st.write(explain_segmentation(int(k_final), prev["chosen_cols"]))
 
                 counts = personas_df['persona'].value_counts().reset_index()
                 counts.columns = ['persona', 'customers']
@@ -308,7 +323,6 @@ with tab2:
             st.info("Click **Preview elbow & silhouette** to see the curves before choosing K.")
     else:
         st.info("We need at least two numeric columns to form personas.")
-
 
     # ----------------- Tab 3: Perceptual Map Wizard -----------------
     with tab3:
