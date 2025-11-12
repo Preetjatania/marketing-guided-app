@@ -1,0 +1,10 @@
+
+streamlit
+numpy
+pandas
+scikit-learn
+matplotlib
+scipy
+kmodes
+openpyxl
+requests
