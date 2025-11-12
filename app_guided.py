@@ -155,6 +155,9 @@ with st.sidebar:
         st.success("Data loaded ✔")
         st.caption(f"Shape: {df.shape[0]:,} rows × {df.shape[1]} columns")
 
+# -----------------------------
+# Action suggestions + Tabs
+# -----------------------------
 st.markdown("### 2) What can we do with your data?")
 if df is None:
     st.info("Load a dataset to see tailored suggestions. Or pick a sample in the sidebar.")
@@ -169,11 +172,62 @@ else:
     st.divider()
     tab1, tab2, tab3 = st.tabs(["Forecast future sales", "Group customers into personas", "Map brand positions"])
 
-    # ----------------- Tab 1 (unchanged) -----------------
+    # ----------------- Tab 1: Bass Diffusion (with forecast lines) -----------------
     with tab1:
-        # ... your existing Bass code ...
+        st.subheader("Forecast future sales (no formulas required)")
+        st.write("Tell us which column has your sales per period (e.g., monthly). We'll fit a curve and forecast ahead.")
+        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        if not num_cols:
+            st.info("We need a numeric sales column. Try the 'Sample Sales (12 months)' dataset in the sidebar.")
+        else:
+            sales_col = st.selectbox("Sales column", options=num_cols)
 
-    # ----------------- Tab 2: Segmentation Wizard (with persistent preview) -----------------
+            ahead = st.number_input(
+                "Forecast periods ahead",
+                min_value=1, value=12, step=1,
+                help="Enter how many future periods to forecast (e.g., months)."
+            )
+            if ahead > 120:
+                st.info("Heads up: forecasting more than 120 periods may be unreliable or slow.")
+
+            if st.button("Make a forecast", key="run_bass"):
+                y = df[sales_col].astype(float).fillna(0).values
+                bd = BassDiffusion()
+                fit = bd.fit(y)
+
+                st.success("Done! Here's what we found:")
+                st.write(explain_bass(fit.p, fit.q, fit.m, len(y)))
+
+                # Forecast
+                cum_future, sales_future = bd.forecast(fit, periods_ahead=int(ahead))
+                t_hist = fit.t
+                t_future = np.arange(t_hist[-1] + 1, t_hist[-1] + 1 + int(ahead))
+
+                # Cumulative (history + forecast)
+                fig, ax = plt.subplots()
+                ax.plot(t_hist, np.cumsum(fit.sales), marker='o', label='What actually happened')
+                ax.plot(t_hist, fit.fitted_cum, label='Fitted cumulative')
+                ax.plot(t_future, cum_future, linestyle='--', label='Forecast cumulative')
+                ax.set_title('Total adopters over time')
+                ax.set_xlabel('Time'); ax.set_ylabel('Cumulative sales'); ax.legend(); ax.grid(True)
+                st.pyplot(fig)
+
+                # Period sales (history + forecast)
+                fig2, ax2 = plt.subplots()
+                ax2.plot(t_hist, fit.sales, marker='o', label='Your sales')
+                ax2.plot(t_hist, fit.fitted_sales, label='Fitted pattern')
+                ax2.plot(t_future, sales_future, linestyle='--', label='Forecast sales')
+                ax2.set_title('Sales per period')
+                ax2.set_xlabel('Time'); ax2.set_ylabel('Sales'); ax2.legend(); ax2.grid(True)
+                st.pyplot(fig2)
+
+                # Table + download
+                forecast_df = pd.DataFrame({'period': t_future, 'forecast_sales': sales_future})
+                st.markdown("**What next?** Use these values as your expected demand, and plan inventory/ads around the peak.")
+                st.dataframe(forecast_df.head(20))
+                st.download_button("Download forecast (CSV)", forecast_df.to_csv(index=False).encode('utf-8'), "forecast.csv", "text/csv")
+
+    # ----------------- Tab 2: Segmentation (preview first, session_state to persist) -----------------
     with tab2:
         st.subheader("Group customers into personas")
         st.write("Pick numeric columns (e.g., recency, frequency, spend). We'll show an elbow preview first, then you pick K.")
@@ -204,7 +258,6 @@ else:
 
                 st.success(f"Suggested K (heuristic): **{prev['best_k']}**")
 
-                import matplotlib.pyplot as plt
                 # Elbow
                 fig1, ax1 = plt.subplots()
                 ks = sorted(prev["inertias"].keys())
@@ -263,7 +316,7 @@ else:
         else:
             st.info("We need at least two numeric columns to form personas.")
 
-    # ----------------- Tab 3: Perceptual Map Wizard -----------------
+    # ----------------- Tab 3: Perceptual Map -----------------
     with tab3:
         st.subheader("Map where brands sit in customers' minds")
         st.write("Have a table with brand names and attribute ratings (like Quality, Value, Style)? We'll make a simple map.")
@@ -287,12 +340,17 @@ else:
                 for brand, (x, y) in ar.coords_2d[['PC1','PC2']].iterrows():
                     ax.text(x, y, brand)
                 for attr, (lx, ly) in ar.loadings[['PC1','PC2']].iterrows():
-                    ax.arrow(0, 0, lx, ly, head_width=0.02, length_includes_head=True)
+                    ax.arrow(0, 0, lx, ly, head_width=2e-2, length_includes_head=True)
                     ax.text(lx*1.1, ly*1.1, attr)
                 ax.axhline(0); ax.axvline(0); ax.grid(True)
                 ax.set_title('Brand Map (attributes driving each axis)')
                 st.pyplot(fig)
 
-                st.download_button("Download brand coordinates (CSV)", ar.coords_2d.reset_index().rename(columns={'index':'Brand'}).to_csv(index=False).encode('utf-8'), "brand_coords.csv", "text/csv")
+                st.download_button(
+                    "Download brand coordinates (CSV)",
+                    ar.coords_2d.reset_index().rename(columns={'index':'Brand'}).to_csv(index=False).encode('utf-8'),
+                    "brand_coords.csv",
+                    "text/csv"
+                )
         else:
             st.info("Pick a brand column and at least 2–3 numeric attribute columns.")
