@@ -1,356 +1,209 @@
-import io
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Tuple
-
-from marketing_toolkit import ConsumerSegmentation, BassDiffusion, PerceptualMaps
+import traceback
+import marketing_toolkit as mt
 
 st.set_page_config(page_title="Marketing Analytics Workbench — Guided", layout="wide")
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def detect_modules(df: pd.DataFrame) -> List[str]:
-    suggestions = []
-    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    text_cols = [c for c in df.columns if pd.api.types.is_string_dtype(df[c])]
+# =======================================================
+# Helpers & Utilities
+# =======================================================
 
-    if len(num_cols) >= 1 and df.shape[0] >= 8:
-        suggestions.append("Bass Diffusion (forecast adoption from sales over time)")
-    if len(num_cols) >= 2 and df.shape[0] >= 50:
-        suggestions.append("Consumer Segmentation (group customers into personas)")
+def safe_run(section):
+    """Decorator for error-handled Streamlit sections."""
+    def wrapper(func):
+        def inner(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                st.error(f"😅 Oops! Something went wrong while running **{section}**.")
+                with st.expander("See technical details"):
+                    st.code(traceback.format_exc())
+        return inner
+    return wrapper
 
-    numeric = df.select_dtypes(include=[np.number])
-    if len(text_cols) >= 1 and len(num_cols) >= 3:
-        suggestions.append("Perceptual Map — Attribute Ratings (visualize brand positions)")
-    if numeric.shape[0] == numeric.shape[1] and numeric.shape[0] >= 3:
-        suggestions.append("Perceptual Map — Overall Similarity (from distance matrix)")
-    return suggestions
 
-def bass_confidence(n_periods: int) -> Tuple[str, str]:
-    if n_periods < 6:
-        return ("Low", "You have fewer than 6 periods — early data makes forecasts very uncertain.")
-    elif n_periods < 10:
-        return ("Moderate", "Around 6–9 periods — fit is possible, but treat results as directional.")
-    elif n_periods < 18:
-        return ("Good", "10–17 periods — usually enough to see adoption curve shape.")
-    else:
-        return ("High", "18+ periods — robust estimation for peak timing and market size.")
+@st.cache_data
+def cached_bass_forecast(sales, ahead, repeat, k):
+    if repeat:
+        return mt.predict_bass_with_repeats(sales, k, ahead)
+    return mt.predict_bass(sales, ahead)
 
-def make_persona_names(df: pd.DataFrame, labels: np.ndarray, feature_cols: List[str]) -> pd.DataFrame:
-    X = df[feature_cols].copy()
-    Xz = (X - X.mean()) / X.std(ddof=0)
-    out = df.copy()
-    out['cluster'] = labels
-    persona_names = {}
-    for k in sorted(np.unique(labels)):
-        sub = Xz[out['cluster'] == k]
-        means = sub.mean().sort_values(ascending=False)
-        top_feats = means.index[:2].tolist()
-        name = " & ".join([f"High {f}" for f in top_feats]) if len(top_feats) >= 2 else (f"High {top_feats[0]}" if top_feats else f"Cluster {k}")
-        persona_names[k] = name
-    out['persona'] = out['cluster'].map(persona_names)
-    return out
 
-def explain_bass(p, q, m, sales_len):
-    conf_label, conf_text = bass_confidence(sales_len)
-    notes = []
-    notes.append(f"Based on your data, innovators (p) ≈ {p:.3f} and social spread (q) ≈ {q:.3f}.")
-    if q > p:
-        notes.append("Word-of-mouth appears stronger than pure innovation — adoption may accelerate after an initial slow start.")
-    else:
-        notes.append("Early adoption is driven more by innovators than by social contagion.")
-    notes.append(f"Estimated market potential (m) ≈ {m:,.0f} cumulative units.")
-    notes.append(f"Confidence: **{conf_label}**. {conf_text}")
-    return " ".join(notes)
+@st.cache_data
+def cached_kmeans_preview(df, numeric_cols, k_range):
+    return mt.run_kmeans_elbow(df, numeric_cols, k_range)
 
-def explain_segmentation(k, feature_cols):
-    return f"We grouped customers into **{k} segments** using the features: {', '.join(feature_cols)}. Each segment shares similar patterns (e.g., spend, frequency). Use these to tailor messaging and offers."
 
-def explain_ar(pc1, pc2):
-    return f"PC1 explains **{pc1:.0%}** and PC2 explains **{pc2:.0%}** of variation. Brands to the right score higher on attributes that load positively on PC1; brands up top score higher on PC2 attributes."
-
-# -----------------------------
-# Example datasets
-# -----------------------------
-def example_sales():
-    np.random.seed(0)
-    t = np.arange(1, 13)
-    p, q, m = 0.03, 0.4, 5000
-    def _cum(tt, p, q, m):
-        return m*(1-np.exp(-(p+q)*tt))/(1+(q/p)*np.exp(-(p+q)*tt))
-    cum = _cum(t, p, q, m)
-    sales = np.diff(np.r_[0.0, cum]) + np.random.normal(0, 3, size=len(t))
-    return pd.DataFrame({'sales': np.maximum(sales, 0)})
-
-def example_customers(n=500):
-    np.random.seed(1)
-    df = pd.DataFrame({
-        'recency_days': np.random.gamma(5, 6, size=n),
-        'frequency': np.random.poisson(3, size=n),
-        'monetary': np.random.gamma(10, 20, size=n),
-        'visits': np.random.poisson(5, size=n)
-    })
-    return df
-
-def example_ar():
-    return pd.DataFrame({
-        'Brand':['A','B','C','D'],
-        'Quality':[7,5,6,8],
-        'Value':[5,8,6,4],
-        'Style':[6,5,7,7],
-        'Sustainability':[8,4,5,9]
-    })
-
-# -----------------------------
-# UI — Guided Mode
-# -----------------------------
-st.title("Guided Mode — Marketing Analytics Workbench")
-st.caption("No data science jargon. Just answers. Upload your data and we'll guide you.")
-
+# =======================================================
+# Sidebar — Data Upload, Reset, and Samples
+# =======================================================
 with st.sidebar:
-    st.header("1) Load your data")
-    src = st.radio("Choose a source", ["Upload file", "Paste URL (CSV/Excel/GitHub)"])
+    st.header("🎯 Let's get started!")
+    st.write("Upload your dataset, or grab one of our samples below 👇")
+
+    if st.button("🔄 Reset App"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
+
+    src = st.radio("How would you like to provide data?",
+                   ["Upload file", "Use a sample"],
+                   help="Choose 'Upload file' for your own CSV/Excel data, or try a sample first.")
+
     df = None
     if src == "Upload file":
-        up = st.file_uploader("Upload a CSV or Excel file", type=["csv","xlsx","xls"])
-        if up is not None:
-            name = up.name.lower()
-            if name.endswith(".csv"):
+        up = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"])
+        if up:
+            if up.name.endswith(".csv"):
                 df = pd.read_csv(up)
             else:
-                df = pd.read_excel(up, engine="openpyxl")
+                df = pd.read_excel(up)
     else:
-        url = st.text_input("Paste direct link (CSV/Excel) or GitHub file URL")
-        if url:
-            import re, requests
-            def is_github_url(u): return "github.com" in u
-            def convert_raw(u):
-                m = re.match(r"https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)", u)
-                if m:
-                    user, repo, branch, path = m.groups()
-                    return f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}"
-                return u
-            if is_github_url(url):
-                url = convert_raw(url)
-            try:
-                df = pd.read_csv(url)
-            except Exception:
-                df = pd.read_excel(url, engine="openpyxl")
+        sample_choice = st.selectbox("Pick a sample dataset",
+                                     ["None",
+                                      "Sample Sales (Bass)",
+                                      "Sample Customers (Segmentation)",
+                                      "Sample Brand Ratings (Perceptual Map)"])
+        if sample_choice == "Sample Sales (Bass)":
+            df = mt.load_sample_sales().to_frame("Sales")
+        elif sample_choice == "Sample Customers (Segmentation)":
+            df = mt.load_sample_segmentation()
+        elif sample_choice == "Sample Brand Ratings (Perceptual Map)":
+            df = mt.load_sample_perceptual()
 
-    st.divider()
-    st.header("Or try an example")
-    demo_choice = st.selectbox("Load a sample dataset", ["None", "Sample Sales (12 months)", "Sample Customers", "Sample Brand Ratings"])
-    if demo_choice == "Sample Sales (12 months)":
-        df = example_sales()
-    elif demo_choice == "Sample Customers":
-        df = example_customers()
-    elif demo_choice == "Sample Brand Ratings":
-        df = example_ar()
+    st.caption("Need a template?")
+    st.download_button("📥 Sales Template",
+                       "period,sales\n2024-01,120\n2024-02,135\n",
+                       "template_sales.csv", "text/csv")
+    st.download_button("📥 Segmentation Template",
+                       "recency_days,frequency,monetary,visits\n10,4,250,6\n",
+                       "template_segmentation.csv", "text/csv")
 
-    st.divider()
-    if df is not None:
-        st.success("Data loaded ✔")
-        st.caption(f"Shape: {df.shape[0]:,} rows × {df.shape[1]} columns")
+# =======================================================
+# Main Title
+# =======================================================
+st.title("Hey there 👋 Welcome to your Marketing Analytics Workbench!")
+st.markdown("Upload your data, and let's explore **sales forecasts**, **customer segments**, "
+            "and **brand perceptions** — all in one friendly place.")
 
-# -----------------------------
-# Action suggestions + Tabs
-# -----------------------------
-st.markdown("### 2) What can we do with your data?")
-if df is None:
-    st.info("Load a dataset to see tailored suggestions. Or pick a sample in the sidebar.")
+if df is not None:
+    st.success(f"Data loaded! Shape: {df.shape[0]} rows × {df.shape[1]} columns")
 else:
-    suggestions = detect_modules(df)
-    if suggestions:
-        for s in suggestions:
-            st.markdown(f"- **{s}**")
+    st.info("⬅️ Start by uploading data or picking a sample on the left.")
+    st.stop()
+
+# =======================================================
+# Tabs
+# =======================================================
+tab1, tab2, tab3 = st.tabs([
+    "Forecast future sales",
+    "Group customers into personas",
+    "Map brand positions"
+])
+
+# =======================================================
+# Tab 1 — Bass Diffusion
+# =======================================================
+with tab1:
+    st.subheader("📈 Forecast future sales")
+    st.write("Let’s uncover how your product might spread through the market over time.")
+
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    if not num_cols:
+        st.warning("No numeric columns found! Please upload a dataset with sales numbers.")
     else:
-        st.warning("We couldn't detect a clear fit. Try a sample or adjust your data.")
+        col1, col2 = st.columns(2)
+        with col1:
+            sales_col = st.selectbox("Choose your sales column", num_cols)
+        with col2:
+            periods_ahead = st.number_input("Forecast periods ahead", 1, 240, 12, help="Number of future periods to predict.")
 
-    st.divider()
-    tab1, tab2, tab3 = st.tabs(["Forecast future sales", "Group customers into personas", "Map brand positions"])
+        repeat_toggle = st.checkbox("Include repeat purchases", value=False,
+                                    help="When checked, includes customers who buy again after adoption.")
+        repeat_rate = 0.5
+        if repeat_toggle:
+            repeat_rate = st.slider("Repeat purchase rate (k)", 0.0, 2.0, 0.5, 0.1)
 
-    # ----------------- Tab 1: Bass Diffusion (with forecast lines) -----------------
-    with tab1:
-        st.subheader("Forecast future sales (no formulas required)")
-        st.write("Tell us which column has your sales per period (e.g., monthly). We'll fit a curve and forecast ahead.")
-        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        if not num_cols:
-            st.info("We need a numeric sales column. Try the 'Sample Sales (12 months)' dataset in the sidebar.")
-        else:
-            sales_col = st.selectbox("Sales column", options=num_cols)
+        run_forecast = st.button("Run Forecast 🚀")
 
-            ahead = st.number_input(
-                "Forecast periods ahead",
-                min_value=1, value=12, step=1,
-                help="Enter how many future periods to forecast (e.g., months)."
-            )
-            if ahead > 120:
-                st.info("Heads up: forecasting more than 120 periods may be unreliable or slow.")
+        @safe_run("Bass Diffusion Forecast")
+        def do_forecast():
+            sales = df[sales_col].dropna().astype(float).values
+            p, q, M, fitted = mt.estimate_bass_params(sales)
+            st.markdown(f"**Estimated parameters:** p={p:.4f}, q={q:.4f}, M={M:,.0f}")
 
-            if st.button("Make a forecast", key="run_bass"):
-                y = df[sales_col].astype(float).fillna(0).values
-                bd = BassDiffusion()
-                fit = bd.fit(y)
+            p, q, M, _ = cached_bass_forecast(sales, periods_ahead, repeat_toggle, repeat_rate)
+            fig = mt.plot_bass_forecast(sales, periods_ahead, repeat_toggle, repeat_rate)
+            st.pyplot(fig)
 
-                st.success("Done! Here's what we found:")
-                st.write(explain_bass(fit.p, fit.q, fit.m, len(y)))
+        if run_forecast:
+            do_forecast()
 
-                # Forecast
-                cum_future, sales_future = bd.forecast(fit, periods_ahead=int(ahead))
-                t_hist = fit.t
-                t_future = np.arange(t_hist[-1] + 1, t_hist[-1] + 1 + int(ahead))
+# =======================================================
+# Tab 2 — Segmentation
+# =======================================================
+with tab2:
+    st.subheader("👥 Group customers into personas")
+    st.write("Let’s find natural clusters of similar customers — these are your personas!")
 
-                # Cumulative (history + forecast)
-                fig, ax = plt.subplots()
-                ax.plot(t_hist, np.cumsum(fit.sales), marker='o', label='What actually happened')
-                ax.plot(t_hist, fit.fitted_cum, label='Fitted cumulative')
-                ax.plot(t_future, cum_future, linestyle='--', label='Forecast cumulative')
-                ax.set_title('Total adopters over time')
-                ax.set_xlabel('Time'); ax.set_ylabel('Cumulative sales'); ax.legend(); ax.grid(True)
-                st.pyplot(fig)
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    cat_cols = [c for c in df.columns if pd.api.types.is_object_dtype(df[c])]
 
-                # Period sales (history + forecast)
-                fig2, ax2 = plt.subplots()
-                ax2.plot(t_hist, fit.sales, marker='o', label='Your sales')
-                ax2.plot(t_hist, fit.fitted_sales, label='Fitted pattern')
-                ax2.plot(t_future, sales_future, linestyle='--', label='Forecast sales')
-                ax2.set_title('Sales per period')
-                ax2.set_xlabel('Time'); ax2.set_ylabel('Sales'); ax2.legend(); ax2.grid(True)
-                st.pyplot(fig2)
+    chosen = st.multiselect("Pick numeric columns for clustering", options=num_cols, default=num_cols[:3])
 
-                # Table + download
-                forecast_df = pd.DataFrame({'period': t_future, 'forecast_sales': sales_future})
-                st.markdown("**What next?** Use these values as your expected demand, and plan inventory/ads around the peak.")
-                st.dataframe(forecast_df.head(20))
-                st.download_button("Download forecast (CSV)", forecast_df.to_csv(index=False).encode('utf-8'), "forecast.csv", "text/csv")
+    if not chosen:
+        st.info("Select at least two numeric columns to start.")
+    else:
+        k_min, k_max = st.slider("Range of clusters (for preview)", 2, 15, (2, 8))
 
-    # ----------------- Tab 2: Segmentation (preview first, session_state to persist) -----------------
-    with tab2:
-        st.subheader("Group customers into personas")
-        st.write("Pick numeric columns (e.g., recency, frequency, spend). We'll show an elbow preview first, then you pick K.")
+        if st.button("Preview elbow chart"):
+            costs = cached_kmeans_preview(df, chosen, (k_min, k_max))
+            st.session_state["elbow_preview"] = costs
+            fig = mt.plot_elbow_chart(costs)
+            st.pyplot(fig)
+            st.success("Nice! The 'elbow' point suggests your ideal K.")
+            st.session_state["numeric_cols"] = chosen
 
-        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        chosen = st.multiselect("Numeric columns", options=num_cols, default=num_cols[:4])
+        if "elbow_preview" in st.session_state:
+            st.write("Pick your final K below 👇")
+            k_final = st.number_input("Final K", min_value=k_min, max_value=k_max, value=k_min)
+            if st.button("Create Personas ✨"):
+                labels, _ = mt.run_kmeans(df, st.session_state["numeric_cols"], int(k_final))
+                summary = mt.summarize_personas(df, labels, st.session_state["numeric_cols"])
+                st.success("Personas created!")
+                st.dataframe(summary)
+                csv = summary.to_csv().encode("utf-8")
+                st.download_button("Download personas CSV", csv, "personas.csv", "text/csv")
 
-        if chosen:
-            k_min, k_max = st.slider("Try groups from K=", 2, 15, (2, 8))
+# =======================================================
+# Tab 3 — Perceptual Maps
+# =======================================================
+with tab3:
+    st.subheader("🗺️ Map brand positions")
+    st.write("Visualize how brands relate to each other and which attributes drive perceptions.")
 
-            # Preview step — compute and store results in session_state
-            if st.button("Preview elbow & silhouette", key="preview_k"):
-                seg_preview = ConsumerSegmentation(standardize=True)
-                res_preview = seg_preview.fit_kmeans(df[chosen].dropna(), k_range=(k_min, k_max))
-                st.session_state["seg_preview"] = {
-                    "inertias": res_preview.inertias,
-                    "silhouettes": res_preview.silhouettes,
-                    "best_k": int(res_preview.best_k),
-                    "chosen_cols": chosen,
-                    "k_min": int(k_min),
-                    "k_max": int(k_max),
-                }
-                st.success("Preview computed. Scroll down to pick the final K.")
+    text_cols = [c for c in df.columns if pd.api.types.is_string_dtype(df[c])]
+    brand_col = st.selectbox("Which column has brand names?", options=["— pick —"] + text_cols)
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    attr_cols = st.multiselect("Pick attribute columns", options=[c for c in num_cols if c != brand_col], default=num_cols[:3])
+    scale = st.checkbox("Standardize attributes", True)
 
-            # Render preview if present
-            if "seg_preview" in st.session_state:
-                prev = st.session_state["seg_preview"]
+    if brand_col != "— pick —" and attr_cols:
+        if st.button("Create Perceptual Map 🪄"):
+            coords, loadings, var = mt.attribute_rating_map(df[[brand_col] + attr_cols].dropna(), brand_col=brand_col, scale=scale)
+            st.write(f"Explained variance — PC1: {var[0]:.1%}, PC2: {var[1]:.1%}")
+            fig = mt.plot_attribute_rating_map(coords, loadings)
+            st.pyplot(fig)
+            csv = coords.to_csv().encode("utf-8")
+            st.download_button("Download coordinates", csv, "brand_coords.csv", "text/csv")
+    else:
+        st.info("Pick a brand column and at least 2–3 numeric attributes.")
 
-                st.success(f"Suggested K (heuristic): **{prev['best_k']}**")
-
-                # Elbow
-                fig1, ax1 = plt.subplots()
-                ks = sorted(prev["inertias"].keys())
-                vals = [prev["inertias"][k] for k in ks]
-                ax1.plot(ks, vals, marker='o')
-                ax1.set_title('Elbow preview (lower is better)')
-                ax1.set_xlabel('K'); ax1.set_ylabel('Inertia'); ax1.grid(True)
-                st.pyplot(fig1)
-
-                # Silhouette
-                fig2, ax2 = plt.subplots()
-                ks2 = sorted(prev["silhouettes"].keys())
-                vals2 = [prev["silhouettes"][k] for k in ks2]
-                ax2.plot(ks2, vals2, marker='o')
-                ax2.set_title('Silhouette preview (higher is better)')
-                ax2.set_xlabel('K'); ax2.set_ylabel('Score'); ax2.grid(True)
-                st.pyplot(fig2)
-
-                st.markdown("**Pick the K you want to use** (follow the elbow ‘knee’ and highest silhouette):")
-                k_final = st.number_input(
-                    "Final K",
-                    min_value=int(prev["k_min"]),
-                    max_value=int(prev["k_max"]),
-                    value=int(prev["best_k"]),
-                    step=1,
-                    help="Choose how many personas you want."
-                )
-
-                if st.button("Create personas with this K", key="finalize_k"):
-                    seg_final = ConsumerSegmentation(standardize=True)
-                    X = df[prev["chosen_cols"]].dropna()
-                    res_final = seg_final.fit_kmeans(X, k_range=(int(k_final), int(k_final)))
-
-                    personas_df = make_persona_names(
-                        df.loc[X.index].copy(),
-                        res_final.labels,
-                        prev["chosen_cols"]
-                    )
-
-                    st.success(f"Personas created with K = {int(k_final)}.")
-                    st.write(explain_segmentation(int(k_final), prev["chosen_cols"]))
-
-                    counts = personas_df['persona'].value_counts().reset_index()
-                    counts.columns = ['persona', 'customers']
-                    st.markdown("**Personas found**")
-                    st.dataframe(counts)
-
-                    st.download_button(
-                        "Download personas (CSV)",
-                        personas_df.to_csv(index=False).encode('utf-8'),
-                        "personas.csv",
-                        "text/csv"
-                    )
-            else:
-                st.info("Click **Preview elbow & silhouette** to see the curves before choosing K.")
-        else:
-            st.info("We need at least two numeric columns to form personas.")
-
-    # ----------------- Tab 3: Perceptual Map -----------------
-    with tab3:
-        st.subheader("Map where brands sit in customers' minds")
-        st.write("Have a table with brand names and attribute ratings (like Quality, Value, Style)? We'll make a simple map.")
-        text_cols = [c for c in df.columns if pd.api.types.is_string_dtype(df[c])]
-        brand_col = st.selectbox("Which column is the brand name?", options=(["— pick —"] + text_cols))
-        numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        attrs = st.multiselect("Which columns are the attribute ratings?", options=[c for c in numeric_cols if c != brand_col], default=numeric_cols[:3])
-        scale = st.checkbox("Standardize attributes (recommended)", value=True)
-
-        if brand_col != "— pick —" and attrs:
-            if st.button("Create the map", key="run_ar_map"):
-                pm = PerceptualMaps()
-                ratings = df[[brand_col] + attrs].dropna()
-                ar = pm.attribute_rating_map(ratings, brand_col=brand_col, scale=scale)
-                st.success("Here's your map — hover labels guide interpretation.")
-
-                st.write(explain_ar(ar.explained_variance_ratio[0], ar.explained_variance_ratio[1]))
-
-                fig, ax = plt.subplots()
-                ax.scatter(ar.coords_2d['PC1'], ar.coords_2d['PC2'])
-                for brand, (x, y) in ar.coords_2d[['PC1','PC2']].iterrows():
-                    ax.text(x, y, brand)
-                for attr, (lx, ly) in ar.loadings[['PC1','PC2']].iterrows():
-                    ax.arrow(0, 0, lx, ly, head_width=2e-2, length_includes_head=True)
-                    ax.text(lx*1.1, ly*1.1, attr)
-                ax.axhline(0); ax.axvline(0); ax.grid(True)
-                ax.set_title('Brand Map (attributes driving each axis)')
-                st.pyplot(fig)
-
-                st.download_button(
-                    "Download brand coordinates (CSV)",
-                    ar.coords_2d.reset_index().rename(columns={'index':'Brand'}).to_csv(index=False).encode('utf-8'),
-                    "brand_coords.csv",
-                    "text/csv"
-                )
-        else:
-            st.info("Pick a brand column and at least 2–3 numeric attribute columns.")
+# =======================================================
+# Footer
+# =======================================================
+st.markdown("---")
+st.caption("Made with ❤️ by your friendly Marketing Analytics Workbench.")
