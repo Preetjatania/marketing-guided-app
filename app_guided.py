@@ -49,9 +49,48 @@ with st.sidebar:
             del st.session_state[k]
         st.rerun()
 
-    src = st.radio("How would you like to provide data?",
-                   ["Upload file", "Use a sample"],
-                   help="Choose 'Upload file' for your own CSV/Excel data, or try a sample first.")
+src = st.radio("How would you like to provide data?",
+               ["Upload file", "Paste a link (GitHub/Drive/CSV URL)", "Use a sample"],
+               help="Upload a file, paste a URL, or use a built-in sample.")
+
+df = None
+if src == "Upload file":
+    up = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"])
+    if up:
+        if up.name.endswith(".csv"):
+            df = pd.read_csv(up)
+        else:
+            df = pd.read_excel(up)
+
+elif src == "Paste a link (GitHub/Drive/CSV URL)":
+    url = st.text_input("Paste your file link here 👇",
+                        help="Works with direct links to CSV/Excel files — e.g., GitHub raw URLs or shared Google Drive links.")
+    if url:
+        try:
+            if url.endswith(".csv"):
+                df = pd.read_csv(url)
+            elif url.endswith((".xlsx", ".xls")):
+                df = pd.read_excel(url)
+            else:
+                df = pd.read_csv(url)  # attempt CSV by default
+            st.success("Loaded data successfully from link ✅")
+        except Exception as e:
+            st.error("⚠️ Could not read the file from that link. Make sure it’s a *direct* CSV/Excel link.")
+            st.caption("If it’s a GitHub file, click **Raw** first, then copy that URL.")
+
+elif src == "Use a sample":
+    sample_choice = st.selectbox("Pick a sample dataset",
+                                 ["None",
+                                  "Sample Sales (Bass)",
+                                  "Sample Customers (Segmentation)",
+                                  "Sample Brand Ratings (Perceptual Map)"])
+    if sample_choice == "Sample Sales (Bass)":
+        df = mt.load_sample_sales().to_frame("Sales")
+    elif sample_choice == "Sample Customers (Segmentation)":
+        df = mt.load_sample_segmentation()
+    elif sample_choice == "Sample Brand Ratings (Perceptual Map)":
+        df = mt.load_sample_perceptual()
+
 
     df = None
     if src == "Upload file":
