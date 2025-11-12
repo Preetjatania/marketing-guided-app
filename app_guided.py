@@ -1,4 +1,3 @@
-
 import io
 import numpy as np
 import pandas as pd
@@ -13,7 +12,6 @@ st.set_page_config(page_title="Marketing Analytics Workbench — Guided", layout
 # -----------------------------
 # Helpers
 # -----------------------------
-
 def detect_modules(df: pd.DataFrame) -> List[str]:
     suggestions = []
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
@@ -21,7 +19,6 @@ def detect_modules(df: pd.DataFrame) -> List[str]:
 
     if len(num_cols) >= 1 and df.shape[0] >= 8:
         suggestions.append("Bass Diffusion (forecast adoption from sales over time)")
-
     if len(num_cols) >= 2 and df.shape[0] >= 50:
         suggestions.append("Consumer Segmentation (group customers into personas)")
 
@@ -30,7 +27,6 @@ def detect_modules(df: pd.DataFrame) -> List[str]:
         suggestions.append("Perceptual Map — Attribute Ratings (visualize brand positions)")
     if numeric.shape[0] == numeric.shape[1] and numeric.shape[0] >= 3:
         suggestions.append("Perceptual Map — Overall Similarity (from distance matrix)")
-
     return suggestions
 
 def bass_confidence(n_periods: int) -> Tuple[str, str]:
@@ -63,7 +59,7 @@ def explain_bass(p, q, m, sales_len):
     notes = []
     notes.append(f"Based on your data, innovators (p) ≈ {p:.3f} and social spread (q) ≈ {q:.3f}.")
     if q > p:
-        notes.append("Word‑of‑mouth appears stronger than pure innovation — adoption may accelerate after an initial slow start.")
+        notes.append("Word-of-mouth appears stronger than pure innovation — adoption may accelerate after an initial slow start.")
     else:
         notes.append("Early adoption is driven more by innovators than by social contagion.")
     notes.append(f"Estimated market potential (m) ≈ {m:,.0f} cumulative units.")
@@ -76,7 +72,9 @@ def explain_segmentation(k, feature_cols):
 def explain_ar(pc1, pc2):
     return f"PC1 explains **{pc1:.0%}** and PC2 explains **{pc2:.0%}** of variation. Brands to the right score higher on attributes that load positively on PC1; brands up top score higher on PC2 attributes."
 
+# -----------------------------
 # Example datasets
+# -----------------------------
 def example_sales():
     np.random.seed(0)
     t = np.arange(1, 13)
@@ -123,7 +121,6 @@ with st.sidebar:
             if name.endswith(".csv"):
                 df = pd.read_csv(up)
             else:
-                import io
                 df = pd.read_excel(up, engine="openpyxl")
     else:
         url = st.text_input("Paste direct link (CSV/Excel) or GitHub file URL")
@@ -170,7 +167,6 @@ else:
         st.warning("We couldn't detect a clear fit. Try a sample or adjust your data.")
 
     st.divider()
-
     tab1, tab2, tab3 = st.tabs(["Forecast future sales", "Group customers into personas", "Map brand positions"])
 
     # ----------------- Tab 1: Bass Diffusion Wizard -----------------
@@ -183,7 +179,7 @@ else:
         else:
             sales_col = st.selectbox("Sales column", options=num_cols)
 
-            # CHANGED: slider -> number_input for free entry
+            # Free-entry forecast horizon
             ahead = st.number_input(
                 "Forecast periods ahead",
                 min_value=1,
@@ -196,6 +192,7 @@ else:
 
             run = st.button("Make a forecast", key="run_bass")
             if run:
+                # Fit on history
                 y = df[sales_col].astype(float).fillna(0).values
                 bd = BassDiffusion()
                 fit = bd.fit(y)
@@ -203,23 +200,32 @@ else:
                 st.success("Done! Here's what we found:")
                 st.write(explain_bass(fit.p, fit.q, fit.m, len(y)))
 
+                # Forecast future
+                cum_future, sales_future = bd.forecast(fit, periods_ahead=int(ahead))
+                t_hist = fit.t
+                t_future = np.arange(t_hist[-1] + 1, t_hist[-1] + 1 + int(ahead))
+
+                # CUMULATIVE (history + forecast)
                 fig, ax = plt.subplots()
-                ax.plot(fit.t, np.cumsum(fit.sales), label='What actually happened', marker='o')
-                ax.plot(fit.t, fit.fitted_cum, label='Our fitted curve (total adopters)')
+                ax.plot(t_hist, np.cumsum(fit.sales), marker='o', label='What actually happened')
+                ax.plot(t_hist, fit.fitted_cum, label='Fitted cumulative')
+                ax.plot(t_future, cum_future, linestyle='--', label='Forecast cumulative')
                 ax.set_title('Total adopters over time')
                 ax.set_xlabel('Time'); ax.set_ylabel('Cumulative sales'); ax.legend(); ax.grid(True)
                 st.pyplot(fig)
 
+                # PERIOD SALES (history + forecast)
                 fig2, ax2 = plt.subplots()
-                ax2.plot(fit.t, fit.sales, label='Your sales', marker='o')
-                ax2.plot(fit.t, fit.fitted_sales, label='Our fitted pattern')
+                ax2.plot(t_hist, fit.sales, marker='o', label='Your sales')
+                ax2.plot(t_hist, fit.fitted_sales, label='Fitted pattern')
+                ax2.plot(t_future, sales_future, linestyle='--', label='Forecast sales')
                 ax2.set_title('Sales per period')
                 ax2.set_xlabel('Time'); ax2.set_ylabel('Sales'); ax2.legend(); ax2.grid(True)
                 st.pyplot(fig2)
 
-                cum_future, sales_future = bd.forecast(fit, periods_ahead=int(ahead))
+                # Table + download
                 forecast_df = pd.DataFrame({
-                    'period': np.arange(len(fit.sales)+1, len(fit.sales)+int(ahead)+1),
+                    'period': t_future,
                     'forecast_sales': sales_future
                 })
                 st.markdown("**What next?** Use these values as your expected demand, and plan inventory/ads around the peak.")
